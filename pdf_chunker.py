@@ -288,11 +288,15 @@ def process_chunk_request(data: dict):
     Process a chunking request from JSON data.
 
     Args:
-        data: Dictionary containing 'text' and optional parameters
+        data: Dictionary containing 'body.text' and optional parameters
 
     Returns:
         Tuple of (response_dict, status_code)
     """
+    # Extract from nested body structure
+    if "body" in data:
+        data = data["body"]
+
     if "text" not in data:
         return {"error": "Missing required field: text"}, 400
 
