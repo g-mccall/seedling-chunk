@@ -10,6 +10,7 @@ relationally-aware chunks that preserve semantic boundaries (paragraphs/sentence
 import os
 import re
 import json
+import time
 from functools import wraps
 from uuid import uuid4, uuid5, NAMESPACE_OID
 from typing import Iterator, Tuple, Dict, Any, Optional
@@ -278,12 +279,39 @@ def batch_chunks_for_zep(chunks: list[Dict[str, Any]], batch_size: int = 20) -> 
     return [episodes[i:i + batch_size] for i in range(0, len(episodes), batch_size)]
 
 
+def wait_for_task_completion(client: Zep, task_id: str, poll_interval: float = 1.0) -> bool:
+    """
+    Poll a task until it completes or fails.
+
+    Args:
+        client: Zep client instance
+        task_id: Task ID to poll
+        poll_interval: Seconds between poll attempts (default: 1.0)
+
+    Returns:
+        True if task completed successfully, False if failed
+    """
+    while True:
+        task = client.task.get(task_id=task_id)
+
+        if task.status == "completed":
+            print(f"Task {task_id} completed successfully")
+            return True
+        elif task.status == "failed":
+            print(f"Task {task_id} failed: {task.error}")
+            return False
+
+        print(f"Task {task_id} status: {task.status}")
+        time.sleep(poll_interval)
+
+
 def upload_chunks_to_zep(
     chunks: list[Dict[str, Any]],
     graph_id: str = None,
 ) -> list[str]:
     """
     Upload chunks to Zep graph database in batches of 20.
+    Waits for each batch to complete before uploading the next.
 
     Args:
         chunks: List of chunk dictionaries
@@ -304,9 +332,19 @@ def upload_chunks_to_zep(
     batches = batch_chunks_for_zep(chunks)
     task_ids = []
 
-    for batch in batches:
+    for i, batch in enumerate(batches):
+        print(f"Uploading batch {i + 1}/{len(batches)}...")
         result = client.graph.add_batch(episodes=batch, graph_id=graph_id)
-        task_ids.extend([episode.task_id for episode in result])
+        batch_task_ids = [episode.task_id for episode in result]
+        task_ids.extend(batch_task_ids)
+
+        # Wait for all tasks in this batch to complete before uploading next batch
+        for task_id in batch_task_ids:
+            success = wait_for_task_completion(client, task_id)
+            if not success:
+                raise RuntimeError(f"Batch {i + 1} failed: task {task_id} did not complete successfully")
+
+        print(f"Batch {i + 1}/{len(batches)} completed")
 
     return task_ids
 
