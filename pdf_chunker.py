@@ -9,10 +9,13 @@ relationally-aware chunks that preserve semantic boundaries (paragraphs/sentence
 
 import os
 import re
+import json
 from functools import wraps
 from uuid import uuid4, uuid5, NAMESPACE_OID
 from typing import Iterator, Tuple, Dict, Any, Optional
 from flask import Flask, request, jsonify
+from zep_cloud.client import Zep
+from zep_cloud import EpisodeData
 
 
 
@@ -251,6 +254,60 @@ def extract_chunks_from_text(
     return chunks
 
 
+# === ZEP INTEGRATION ===
+
+def batch_chunks_for_zep(chunks: list[Dict[str, Any]], batch_size: int = 20) -> list[list[EpisodeData]]:
+    """
+    Convert chunks to EpisodeData and batch into groups.
+
+    Args:
+        chunks: List of chunk dictionaries from extract_chunks_from_text
+        batch_size: Number of episodes per batch (default: 20)
+
+    Returns:
+        List of batches, each containing up to batch_size EpisodeData objects
+    """
+    episodes = [
+        EpisodeData(
+            data=json.dumps(chunk),
+            type="json"
+        )
+        for chunk in chunks
+    ]
+
+    return [episodes[i:i + batch_size] for i in range(0, len(episodes), batch_size)]
+
+
+def upload_chunks_to_zep(chunks: list[Dict[str, Any]], graph_id: str = None) -> list[str]:
+    """
+    Upload chunks to Zep graph database in batches of 20.
+
+    Args:
+        chunks: List of chunk dictionaries
+        graph_id: Zep graph ID (defaults to ZEP_GRAPH_ID env var)
+
+    Returns:
+        List of task_ids for tracking batch processing
+    """
+    api_key = os.environ.get("ZEP_API_KEY")
+    graph_id = graph_id or os.environ.get("ZEP_GRAPH_ID")
+
+    if not api_key:
+        raise ValueError("ZEP_API_KEY environment variable not set")
+    if not graph_id:
+        raise ValueError("ZEP_GRAPH_ID environment variable not set")
+
+    client = Zep(api_key=api_key)
+    batches = batch_chunks_for_zep(chunks)
+    task_ids = []
+
+    for batch in batches:
+        result = client.graph.add_batch(episodes=batch, graph_id=graph_id)
+        task_ids.extend([episode.task_id for episode in result])
+
+    return task_ids
+
+
 # === HTTP SERVER ===
 
 app = Flask(__name__)
@@ -284,7 +341,7 @@ def require_api_token(f):
 
 def process_chunk_request(data: dict):
     """
-    Process a chunking request from JSON data.
+    Process a chunking request from JSON data and upload to Zep.
 
     Args:
         data: Dictionary containing 'body.text' and optional parameters
@@ -303,6 +360,7 @@ def process_chunk_request(data: dict):
     document_name = data.get("document_name", "document")
     max_chunk_size = data.get("max_chunk_size", 200)
     batch_paragraphs = data.get("batch_paragraphs", True)
+    graph_id = data.get("graph_id")
 
     if not isinstance(text, str):
         return {"error": "Field 'text' must be a string"}, 400
@@ -318,13 +376,19 @@ def process_chunk_request(data: dict):
             batch_paragraphs=batch_paragraphs,
         )
 
-        return {
+        task_ids = upload_chunks_to_zep(chunks, graph_id)
+
+        response = {
             "chunks": chunks,
             "total_chunks": len(chunks),
             "document_name": document_name,
             "max_chunk_size": max_chunk_size,
             "batch_paragraphs": batch_paragraphs,
-        }, 200
+            "zep_task_ids": task_ids,
+            "zep_batches": (len(chunks) + 19) // 20,
+        }
+
+        return response, 200
 
     except Exception as e:
         return {"error": str(e)}, 500
@@ -334,19 +398,27 @@ def process_chunk_request(data: dict):
 @require_api_token
 def api_chunk():
     """
-    Main API endpoint for chunking text.
+    Main API endpoint for chunking text and uploading to Zep.
 
     Expects JSON body:
     {
-        "text": "The text to chunk"
+        "text": "The text to chunk",
+        "document_name": "optional document name",
+        "max_chunk_size": 200,  // optional, default 200
+        "batch_paragraphs": true,  // optional, default true
+        "graph_id": "optional graph id override"  // optional, uses ZEP_GRAPH_ID env var if not provided
     }
 
-    Optional fields:
-    - document_name: string (default: "document")
-    - max_chunk_size: integer (default: 200)
-    - batch_paragraphs: boolean (default: true)
-
-    Returns JSON with chunks array and metadata.
+    Returns JSON:
+    {
+        "chunks": [...],
+        "total_chunks": N,
+        "document_name": "...",
+        "max_chunk_size": N,
+        "batch_paragraphs": bool,
+        "zep_task_ids": [...],
+        "zep_batches": N
+    }
     """
     if not request.is_json:
         return jsonify({"error": "Content-Type must be application/json"}), 400
@@ -360,24 +432,7 @@ def api_chunk():
 @require_api_token
 def chunk_text():
     """
-    HTTP endpoint to chunk text (alias for /api).
-
-    Expects JSON body:
-    {
-        "text": "The text to chunk",
-        "document_name": "optional document name",
-        "max_chunk_size": 200,  // optional, default 200
-        "batch_paragraphs": true  // optional, default true
-    }
-
-    Returns JSON:
-    {
-        "chunks": [...],
-        "total_chunks": N,
-        "document_name": "...",
-        "max_chunk_size": N,
-        "batch_paragraphs": bool
-    }
+    HTTP endpoint to chunk text and upload to Zep (alias for /api).
     """
     if not request.is_json:
         return jsonify({"error": "Content-Type must be application/json"}), 400
@@ -409,10 +464,13 @@ def main():
     print("=" * 80)
     print(f"\nServer starting on http://{host}:{port}")
     print("\nEndpoints:")
-    print("  POST /api    - Main API endpoint (JSON body with 'text' field)")
+    print("  POST /api    - Chunk text and upload to Zep (JSON body with 'text' field)")
     print("  POST /chunk  - Alias for /api")
     print("  GET  /health - Health check")
     print("  GET  /       - Health check")
+    print("\nRequired environment variables:")
+    print("  ZEP_API_KEY   - Your Zep Cloud API key")
+    print("  ZEP_GRAPH_ID  - Target graph ID for uploads")
     print("\n" + "=" * 80 + "\n")
 
     app.run(host=host, port=port, debug=debug)
