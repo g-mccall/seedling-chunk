@@ -244,7 +244,6 @@ def extract_chunks_from_text(
             "chunk_size": chunk_data["chunk_size"],
             "cut_type": chunk_data["cut_type"],
             "document_name": document_name,
-            "paragraph_ids": chunk_data["paragraph_ids"],
             "text": chunk_data["text"],
         }
         chunks.append(chunk)
