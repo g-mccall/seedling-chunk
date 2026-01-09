@@ -10,6 +10,7 @@ relationally-aware chunks that preserve semantic boundaries (paragraphs/sentence
 import os
 import re
 import json
+import time
 from functools import wraps
 from uuid import uuid4, uuid5, NAMESPACE_OID
 from typing import Iterator, Tuple, Dict, Any, Optional
@@ -278,9 +279,13 @@ def batch_chunks_for_zep(chunks: list[Dict[str, Any]], batch_size: int = 20) -> 
     return [episodes[i:i + batch_size] for i in range(0, len(episodes), batch_size)]
 
 
-def upload_chunks_to_zep(chunks: list[Dict[str, Any]], graph_id: str = None) -> list[str]:
+def upload_chunks_to_zep(
+    chunks: list[Dict[str, Any]],
+    graph_id: str = None,
+) -> list[str]:
     """
     Upload chunks to Zep graph database in batches of 20.
+    Waits 60 seconds between each batch.
 
     Args:
         chunks: List of chunk dictionaries
@@ -301,7 +306,9 @@ def upload_chunks_to_zep(chunks: list[Dict[str, Any]], graph_id: str = None) -> 
     batches = batch_chunks_for_zep(chunks)
     task_ids = []
 
-    for batch in batches:
+    for i, batch in enumerate(batches):
+        if i > 0:
+            time.sleep(60)
         result = client.graph.add_batch(episodes=batch, graph_id=graph_id)
         task_ids.extend([episode.task_id for episode in result])
 
